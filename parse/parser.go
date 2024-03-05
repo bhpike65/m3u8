@@ -23,6 +23,7 @@ func FromURL(link string) (*Result, error) {
 	link = u.String()
 	body, err := tool.Get(link)
 	if err != nil {
+		fmt.Println("request link:", link)
 		return nil, fmt.Errorf("request m3u8 URL failed: %s", err.Error())
 	}
 	//noinspection GoUnhandledErrorResult
@@ -31,9 +32,16 @@ func FromURL(link string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if len(m3u8.MasterPlaylist) != 0 {
-		sf := m3u8.MasterPlaylist[0]
-		return FromURL(tool.ResolveURL(u, sf.URI))
+		var r *Result
+		for _, sf := range m3u8.MasterPlaylist {
+			r, err = FromURL(tool.ResolveURL(u, sf.URI))
+			if err == nil {
+				break
+			}
+		}
+		return r, err
 	}
 	if len(m3u8.Segments) == 0 {
 		return nil, errors.New("can not found any TS file description")

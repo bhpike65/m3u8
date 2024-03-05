@@ -29,12 +29,12 @@ type Downloader struct {
 	tsFolder string
 	finish   int32
 	segLen   int
-
-	result *parse.Result
+	name     string
+	result   *parse.Result
 }
 
 // NewTask returns a Task instance
-func NewTask(output string, url string) (*Downloader, error) {
+func NewTask(output string, url string, filename string) (*Downloader, error) {
 	result, err := parse.FromURL(url)
 	if err != nil {
 		return nil, err
@@ -53,7 +53,7 @@ func NewTask(output string, url string) (*Downloader, error) {
 	if err := os.MkdirAll(folder, os.ModePerm); err != nil {
 		return nil, fmt.Errorf("create storage folder failed: %s", err.Error())
 	}
-	tsFolder := filepath.Join(folder, tsFolderName)
+	tsFolder := filepath.Join(folder, filename+"tmp")
 	if err := os.MkdirAll(tsFolder, os.ModePerm); err != nil {
 		return nil, fmt.Errorf("create ts folder '[%s]' failed: %s", tsFolder, err.Error())
 	}
@@ -61,6 +61,7 @@ func NewTask(output string, url string) (*Downloader, error) {
 		folder:   folder,
 		tsFolder: tsFolder,
 		result:   result,
+		name:     filename,
 	}
 	d.segLen = len(result.M3u8.Segments)
 	d.queue = genSlice(d.segLen)
@@ -68,33 +69,31 @@ func NewTask(output string, url string) (*Downloader, error) {
 }
 
 // Start runs downloader
-func (d *Downloader) Start(concurrency int) error {
-	var wg sync.WaitGroup
-	// struct{} zero size
-	limitChan := make(chan struct{}, concurrency)
+func (d *Downloader) Start(batch int) error {
 	for {
-		tsIdx, end, err := d.next()
+		tsIdxs, end, err := d.next(batch)
 		if err != nil {
 			if end {
 				break
 			}
 			continue
 		}
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			if err := d.download(idx); err != nil {
-				// Back into the queue, retry request
-				fmt.Printf("[failed] %s\n", err.Error())
-				if err := d.back(idx); err != nil {
-					fmt.Printf(err.Error())
+		var wg sync.WaitGroup
+		for _, tsIdx := range tsIdxs {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				if err := d.download(idx); err != nil {
+					// Back into the queue, retry request
+					fmt.Printf("[failed] %s\n", err.Error())
+					if err := d.back(idx); err != nil {
+						fmt.Printf(err.Error())
+					}
 				}
-			}
-			<-limitChan
-		}(tsIdx)
-		limitChan <- struct{}{}
+			}(tsIdx)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 	if err := d.merge(); err != nil {
 		return err
 	}
@@ -159,7 +158,7 @@ func (d *Downloader) download(segIndex int) error {
 	return nil
 }
 
-func (d *Downloader) next() (segIndex int, end bool, err error) {
+func (d *Downloader) next(batch int) (segIndex []int, end bool, err error) {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 	if len(d.queue) == 0 {
@@ -172,8 +171,11 @@ func (d *Downloader) next() (segIndex int, end bool, err error) {
 		end = false
 		return
 	}
-	segIndex = d.queue[0]
-	d.queue = d.queue[1:]
+	if batch > len(d.queue) {
+		batch = len(d.queue)
+	}
+	segIndex = d.queue[:batch]
+	d.queue = d.queue[batch:]
 	return
 }
 
@@ -202,7 +204,7 @@ func (d *Downloader) merge() error {
 	}
 
 	// Create a TS file for merging, all segment files will be written to this file.
-	mFilePath := filepath.Join(d.folder, mergeTSFilename)
+	mFilePath := filepath.Join(d.folder, d.name)
 	mFile, err := os.Create(mFilePath)
 	if err != nil {
 		return fmt.Errorf("create main TS file failed：%s", err.Error())
@@ -217,6 +219,7 @@ func (d *Downloader) merge() error {
 		bytes, err := ioutil.ReadFile(filepath.Join(d.tsFolder, tsFilename))
 		_, err = writer.Write(bytes)
 		if err != nil {
+			fmt.Println(err)
 			continue
 		}
 		mergedCount++
